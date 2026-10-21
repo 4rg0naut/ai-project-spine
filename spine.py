@@ -12,8 +12,8 @@ Canonicalization: RFC 8785-style JCS, byte-compatible with the OpenClaims
 v0.1 reference (proven by `claim conform` against embedded fixtures that
 must reproduce their reference digests).
 
-v0.2: init/verify/sign + native claim family + conformance self-test.
-`loop` (confidence decay) and `mcp` are v0.3 - deliberately unbuilt.
+v0.3: init/verify/sign + native claim family + conformance self-test +
+todo/loop (decaying-confidence intentions engine). `mcp` is v0.4.
 """
 import argparse
 import base64
@@ -28,7 +28,7 @@ import time
 import uuid
 from decimal import Decimal
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 LEDGER = os.path.join("claims", "claims.jsonl")
 SPEC_VERSION = "0.1.0"
 SCHEMA_URL = "https://openclaims.org/schemas/openclaims/0.1/ClaimEvent.schema.json"
@@ -374,6 +374,10 @@ def cmd_claim_verdict(args, root, kind):
     ev = base_event("claim." + kind)
     ev["claim_ref"] = args.claim_ref
     if kind == "verified":
+        if args.method == "model_check" and args.confidence > 0.6:
+            sys.exit("reject: model_check cannot grade above 0.6 - the loop "
+                     "that wrote an item cannot be its own judge (rule R4); "
+                     "use human_review/pipeline/formal_proof with evidence")
         v = {"verification_id": new_id("ver"),
              "verification_result": args.result,
              "verification_method": args.method,
@@ -389,6 +393,12 @@ def cmd_claim_verdict(args, root, kind):
         ev["retracted_at"] = now()
         ev["retraction_reason"] = args.reason
     ev = append_event(root, ev)
+    if kind == "verified":
+        todo_ids = [cid for cid, it in todo_state(root)[0].items()
+                    if cid == args.claim_ref]
+        if todo_ids:
+            write_todo_md(root)
+            attest_claim(root, "TODO.md", "spine claim", "verdict refresh")
     print(json.dumps({"ok": True, "event_id": ev["event_id"],
                       "claim_ref": args.claim_ref}))
 
@@ -418,6 +428,163 @@ def cmd_claim_query(args, root):
     for cid, s in sorted(state.items()):
         print("%s  %-9s %-10s %-28s %s" % (cid, s["type"], s["status"],
                                            s["result"], s["text"]))
+
+
+# ------------------------------------------------------- todo + loop (v0.3)
+def action_for(conf):
+    if conf >= 0.7:
+        return "execute"
+    if conf >= 0.4:
+        return "re-probe"
+    if conf >= 0.2:
+        return "defer"
+    return "expired"
+
+
+def todo_state(root):
+    """Effective view of TODO items: conf = last verdict, decay applied."""
+    items, loop_index = {}, 0
+    for ev in read_events(root):
+        c = ev.get("claim") or {}
+        sp = (c.get("context") or {}).get("spine") or {}
+        t = ev["event_type"]
+        if t == "claim.emitted" and sp.get("kind") == "todo":
+            items[c["claim_id"]] = {"what": sp["what"], "why": sp["why"],
+                                    "kills": sp["kills"],
+                                    "conf": sp["conf"], "status": "active",
+                                    "touched": ev["event_time"][:10]}
+        elif t == "claim.emitted" and sp.get("kind") == "loop":
+            loop_index = max(loop_index, sp["index"])
+        cid = ev.get("claim_ref")
+        if cid in items:
+            if t == "claim.verified":
+                v = ev["verification"]
+                conf = v["confidence"]
+                if v["verification_method"] == "model_check":
+                    conf = min(conf, 0.6)
+                items[cid]["conf"] = conf
+                items[cid]["touched"] = ev["event_time"][:10]
+            elif t == "claim.disputed":
+                items[cid]["conf"] = min(items[cid]["conf"], 0.2)
+            elif t == "claim.retracted":
+                items[cid]["status"] = "retracted"
+    return items, loop_index
+
+
+def write_todo_md(root):
+    items, loop_index = todo_state(root)
+    head = render(TPL["TODO.md"], "TODO").split("(empty")[0]
+    lines = [head.rstrip(), "", ""]
+    active = {k: v for k, v in items.items() if v["status"] == "active"}
+    if not active:
+        lines.append("(empty - a human or the first justified session fills "
+                     "this)")
+    for cid, it in sorted(active.items(), key=lambda kv: -kv[1]["conf"]):
+        lines.append("- [ ] %s (%s) | why: %s | kills-it-if: %s | conf %.2f "
+                     "| last-touch %s" % (it["what"], cid[:15], it["why"],
+                                          it["kills"], it["conf"],
+                                          it["touched"]))
+    lines.append("")
+    lines.append("# loop %d | actions: >=0.70 execute | 0.40-0.69 re-probe | "
+                 "0.20-0.39 defer | <0.20 expired" % loop_index)
+    with open(os.path.join(root, "TODO.md"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return items, loop_index
+
+
+def cmd_todo(args, root):
+    if args.action == "add":
+        if len([1 for _, it in todo_state(root)[0].items()
+                if it["status"] == "active"]) >= PARAMS["todo_max_items"]:
+            sys.exit("todo: cap %d reached - retire something first "
+                     "(disposable by rule R4)"
+                     % PARAMS["todo_max_items"])
+        ev = base_event("claim.emitted")
+        ev["claim"] = {"claim_id": new_id("clm"),
+                       "text": "TODO: %s | why: %s | kills-it-if: %s"
+                               % (args.what, args.why, args.kills),
+                       "claim_type": "recommendation", "asserted_at": now(),
+                       "context": {"spine": {"kind": "todo",
+                                             "what": args.what,
+                                             "why": args.why,
+                                             "kills": args.kills,
+                                             "conf": args.conf}}}
+        append_event(root, ev)
+        print("added:", ev["claim"]["claim_id"])
+    elif args.action == "done":
+        ev = base_event("claim.verified")
+        ev["claim_ref"] = args.claim_ref
+        ev["verification"] = {"verification_id": new_id("ver"),
+                              "verification_result": "supported",
+                              "verification_method": "human_review",
+                              "claim_status": "active",
+                              "validator": {"agent_id": "urn:human:" +
+                                            args.by, "agent_type": "human",
+                                            "name": args.by},
+                              "verified_at": now(), "confidence": 0.95}
+        append_event(root, ev)
+        print("done (human attested):", args.claim_ref)
+    elif args.action == "drop":
+        ev = base_event("claim.retracted")
+        ev["claim_ref"] = args.claim_ref
+        ev["retracted_at"] = now()
+        ev["retraction_reason"] = args.reason
+        append_event(root, ev)
+        print("dropped:", args.claim_ref)
+    write_todo_md(root)
+    attest_claim(root, "TODO.md", "spine todo", args.action)
+
+
+def cmd_loop_close(args, root):
+    items, loop_index = todo_state(root)
+    idx = loop_index + 1
+    touch = set(args.touch or [])
+    report = []
+    for cid, it in sorted(items.items()):
+        if it["status"] != "active":
+            continue
+        ev = base_event("claim.verified")
+        ev["claim_ref"] = cid
+        if cid in touch:
+            conf = args.touch_conf
+            result = "supported"
+        else:
+            conf = round(it["conf"] * 0.9, 3)
+            result = "inconclusive"
+        conf = min(conf, 0.6) if args.method == "model_check" else conf
+        ev["verification"] = {"verification_id": new_id("ver"),
+                              "verification_result": result,
+                              "verification_method": args.method,
+                              "claim_status": "active",
+                              "validator": {"agent_id":
+                                            "urn:tool:ai-project-spine",
+                                            "agent_type": "pipeline",
+                                            "name": "spine loop " + VERSION},
+                              "verified_at": now(), "confidence": conf}
+        append_event(root, ev)
+        report.append((cid[:15], it["what"][:40], conf, action_for(conf)))
+        if conf < 0.2:
+            ev = base_event("claim.retracted")
+            ev["claim_ref"] = cid
+            ev["retracted_at"] = now()
+            ev["retraction_reason"] = ("expired: conf %.2f < 0.2 after loop "
+                                       "%d" % (conf, idx))
+            append_event(root, ev)
+            report[-1] = (cid[:15], it["what"][:40], conf, "EXPIRED+retracted")
+    ev = base_event("claim.emitted")
+    ev["claim"] = {"claim_id": new_id("clm"),
+                   "text": "loop %d closed: %d items updated" % (idx,
+                                                                 len(report)),
+                   "claim_type": "factual", "asserted_at": now(),
+                   "context": {"spine": {"kind": "loop", "index": idx}}}
+    append_event(root, ev)
+    write_todo_md(root)
+    attest_claim(root, "TODO.md", "spine loop", "loop %d" % idx)
+    print("loop %d closed:" % idx)
+    for cid, what, conf, act in report:
+        print("  %-16s %-42s conf %.2f  -> %s" % (cid, what, conf, act))
+    if not report:
+        print("  (no active items)")
 
 
 # ------------------------------------------------------------- conformance
@@ -755,6 +922,31 @@ def main():
     cc.add_argument("--dir", default=".")
     cf = csub.add_parser("conform")
 
+    pt = sub.add_parser("todo")
+    tsub = pt.add_subparsers(dest="action")
+    ta = tsub.add_parser("add")
+    ta.add_argument("--what", required=True)
+    ta.add_argument("--why", required=True)
+    ta.add_argument("--kills", required=True)
+    ta.add_argument("--conf", type=float, default=0.55)
+    ta.add_argument("--dir", default=".")
+    td = tsub.add_parser("done")
+    td.add_argument("claim_ref")
+    td.add_argument("--by", required=True)
+    td.add_argument("--dir", default=".")
+    tx = tsub.add_parser("drop")
+    tx.add_argument("claim_ref")
+    tx.add_argument("--reason", required=True)
+    tx.add_argument("--dir", default=".")
+
+    plo = sub.add_parser("loop")
+    plo.add_argument("--close", action="store_true", required=True)
+    plo.add_argument("--touch", nargs="*", default=[])
+    plo.add_argument("--touch-conf", type=float, default=0.6)
+    plo.add_argument("--method", default="model_check",
+                     choices=sorted(VERIFICATION_METHODS))
+    plo.add_argument("--dir", default=".")
+
     args = ap.parse_args()
     if not args.cmd:
         ap.print_help()
@@ -765,6 +957,13 @@ def main():
         cmd_verify(args)
     elif args.cmd == "sign":
         cmd_sign(args)
+    elif args.cmd == "todo":
+        if not args.action:
+            pt.print_help()
+            sys.exit(2)
+        cmd_todo(args, args.dir)
+    elif args.cmd == "loop":
+        cmd_loop_close(args, args.dir)
     elif args.cmd == "claim":
         if args.verb == "emit":
             cmd_claim_emit(args, args.dir)

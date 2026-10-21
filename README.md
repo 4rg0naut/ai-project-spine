@@ -35,7 +35,7 @@ Your harness rule to add (one line in the fleet-level agent file):
 > New project? Run `python3 path/to/spine.py init --name "X"`, then read
 > its AGENTS.md. Never hand-write the skeleton.
 
-## The verbs (v0.2)
+## The verbs (v0.3)
 
 - `init --name NAME [--dir DIR] [--force]` — generate the skeleton, seed
   rule claims (cited + dated), attest every file.
@@ -51,10 +51,26 @@ Your harness rule to add (one line in the fleet-level agent file):
   digests must match byte-exactly, the 5 invalid must be rejected. Rules
   and attestations are themselves spec-native claims, so the fleet's `ocl`
   CLI reads a spine-written ledger unmodified (interop proven both ways).
+- `todo add|done|drop` — intentions as ledger claims, capped at 3 items,
+  each with what/why/what-kills-it. TODO.md is regenerated and re-signed
+  on every change (the gate writes; humans read).
+- `loop --close [--touch ID...]` — the end-of-batch ritual: untouched
+  items decay ×0.9, touched items re-grade (model_check is capped at 0.6:
+  the loop that wrote an item cannot be its own judge), items below 0.2
+  auto-expire with a retraction event, and a numbered loop marker lands
+  in the chain. The report tells you per item: execute / re-probe /
+  defer / expired.
 
-`loop` (confidence decay engine) and `mcp` (same verbs as MCP tools) are
-v0.3 — deliberately unbuilt until a real project has used `init` long
-enough to deserve them (rule R5).
+`mcp` (same verbs as MCP tools for agent harnesses) is v0.4 — thin
+mechanical hat over the existing CLI.
+
+## The confidence loop, in one story
+
+Agent proposes "Vendor MathJax" (conf 0.55; agent-written items start
+≤0.6). Two loops of other work: 0.55 → 0.49 → 0.44, action drifts toward
+defer. Human confirms classroom dropout logs: human_review 0.85 →
+execute. Nobody had to remember anything, and nothing stale executed just
+because it was written down. That is rule R4, made mechanical.
 
 ## Why the skeleton looks like this
 
