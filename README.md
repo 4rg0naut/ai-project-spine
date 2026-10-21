@@ -35,19 +35,25 @@ Your harness rule to add (one line in the fleet-level agent file):
 > New project? Run `python3 path/to/spine.py init --name "X"`, then read
 > its AGENTS.md. Never hand-write the skeleton.
 
-## The three verbs (v0.1)
+## The verbs (v0.2)
 
 - `init --name NAME [--dir DIR] [--force]` — generate the skeleton, seed
-  rule claims, attest every file.
+  rule claims (cited + dated), attest every file.
 - `verify` — the loud one: ledger chain intact? every file hash matches?
   any spine file touched outside the gate → `UNATTESTED` + exit 1.
   Also enforces: AGENTS.md length cap, STATE.md keeps its next-command.
 - `sign [files...] --by WHO --reason "why"` — attestation for authorized
   hand edits. Hand edits stay legal; they just stop being invisible.
   No args → auto-detects drifted files.
+- `claim emit|verify|dispute|retract|query|chain|conform` — real claims in
+  native OpenClaims v0.1 events. `conform` self-tests the built-in
+  canonicalizer against embedded spec fixtures: the 4 valid reference
+  digests must match byte-exactly, the 5 invalid must be rejected. Rules
+  and attestations are themselves spec-native claims, so the fleet's `ocl`
+  CLI reads a spine-written ledger unmodified (interop proven both ways).
 
 `loop` (confidence decay engine) and `mcp` (same verbs as MCP tools) are
-v0.2 — deliberately unbuilt until a real project has used `init` long
+v0.3 — deliberately unbuilt until a real project has used `init` long
 enough to deserve them (rule R5).
 
 ## Why the skeleton looks like this
