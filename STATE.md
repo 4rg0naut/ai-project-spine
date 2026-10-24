@@ -7,7 +7,8 @@ STATE.md, decaying TODO.md, decisions/bugs/lessons) plus a self-contained
 OpenClaims v0.1 ledger gate. This repo is self-hosted: it carries its own
 spine ledger since 2026-10-21.
 
-- Phase: v0.3.1 - ref-resolution hardening + selftest gate shipped.
+- Phase: v0.4 - preflight (R7), close, sessions ingest, golden ritual,
+  orphan-coverage, retest enforcement, session-standardized producer.
 - Open risks: none recorded yet (see BUGS.md).
 
 Next command:
@@ -16,3 +17,5 @@ Next command:
 
 Resume rule: this file ends with the literal next command. Any session
 (quota death, power cut, new agent) restarts from this file alone.
+
+Closed 2026-10-24T19:07:55Z by openfox-builder: supersedes (nothing) - v0.4 released: R7+preflight, close, sessions ingest, --with-golden, orphan-coverage, retest enforcement, session-standardized producer; AI_dev named as earning customer

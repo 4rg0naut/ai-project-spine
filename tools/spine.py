@@ -15,7 +15,14 @@ must reproduce their reference digests).
 v0.3.1: same surface, less lying - claim refs must resolve (exact id or
 unique prefix, else exit 2 and the ledger stays byte-identical), full ids
 everywhere so copy-paste cannot silently no-op, and a `selftest` gate that
-walks the exact paths a human copies. `mcp` is v0.4.
+walks the exact paths a human copies.
+
+v0.4: the mechanisms a live campaign earned (AI_dev, 2026-10-24):
+`preflight` (search-before-build gate, rule R7), orphan-coverage in verify
+(unreferenced claims flagged), BUGS.md `retest:` enforcement for discarded
+results, `close --supersedes` (STATE tail + claim event), and session ids
+standardized into the signature producer (OPENFOX_SESSION_ID honored).
+`mcp` is v0.5.
 """
 import argparse
 import base64
@@ -32,7 +39,7 @@ import time
 import uuid
 from decimal import Decimal
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 LEDGER = os.path.join("claims", "claims.jsonl")
 SPEC_VERSION = "0.1.0"
 SCHEMA_URL = "https://openclaims.org/schemas/openclaims/0.1/ClaimEvent.schema.json"
@@ -79,12 +86,23 @@ RULES = [
     ("R6-attest-not-forbid", "Tamper-visibility beats tamper-resistance: "
      "hand edits are legal, but unsigned drift is loud via the hash chain.",
      "OpenClaims v0.1 event model (openclaims.org spec 0.1)", "2026-10"),
+    ("R7-preflight-search", "Search before you build: every idea feels "
+     "novel; re-deriving settled work is the dominant project-killer, so "
+     "grep claims + TODO + the artifacts index before funding work "
+     "(`preflight`). Born of a measured incident: two main branches held "
+     "47-vs-30 divergent commits and each side re-derived the other's "
+     "settled work; origin report 'I feel this was already done'.",
+     "AI_dev ncm-run/docs/incidents.md BUG-BRANCH-BLINDNESS (2026-10-24)",
+     "2026-10-24"),
 ]
 
 
 def producer():
-    return {"agent_id": os.environ.get("SPINE_PRODUCER_ID",
-                                       "urn:tool:ai-project-spine"),
+    aid = os.environ.get("SPINE_PRODUCER_ID")
+    if not aid:                                  # standardize session ids
+        sid = os.environ.get("OPENFOX_SESSION_ID")
+        aid = "urn:session:" + sid if sid else "urn:tool:ai-project-spine"
+    return {"agent_id": aid,
             "agent_type": os.environ.get("SPINE_PRODUCER_TYPE", "service"),
             "name": os.environ.get("SPINE_PRODUCER_NAME",
                                    "ai-project-spine " + VERSION)}
@@ -640,11 +658,123 @@ def cmd_loop_close(args, root):
         print("  (no active items)")
 
 
+# ------------------------------------------------------------- preflight
+ARTIFACT_INDEX_DEFAULT = ["README.md", "STATE.md", "TODO.md", "DECISIONS.md",
+                          "BUGS.md", "CLAIMS.md"]
+
+
+def cmd_preflight(args, root):
+    """Rule R7: search the house before funding work. Read + one audit
+    event; never mutates project files. Exit 2 on hits unless --reason."""
+    terms = [t for t in re.split(r"[^a-z0-9_]+", args.query.lower())
+             if len(t) >= 4]
+    if not terms:
+        sys.exit("preflight: query needs >=1 word of 4+ chars")
+    hits = []
+    for ev in read_events(root):
+        text = ((ev.get("claim") or {}).get("text") or "")
+        low = text.lower()
+        if any(t in low for t in terms):
+            hits.append(("ledger", ev.get("event_time", "?"),
+                         text[:100].replace("\n", " ")))
+    index = list(ARTIFACT_INDEX_DEFAULT) + (args.artifacts or [])
+    extra = os.environ.get("SPINE_ARTIFACTS", "")
+    if extra:
+        index += [p for p in extra.split(os.pathsep) if p]
+    for rel in index:
+        p = os.path.join(root, rel)
+        if not os.path.exists(p):
+            continue
+        d = time.strftime("%Y-%m-%d", time.gmtime(os.path.getmtime(p)))
+        for ln in open(p, encoding="utf-8", errors="replace"):
+            low = ln.lower()
+            if any(t in low for t in terms):
+                hits.append((rel, d, ln.strip()[:100]))
+    shown = hits[:12]
+    for src, d, txt in shown:
+        print("  [%s %s] %s" % (src, d, txt))
+    ev = base_event("claim.emitted")
+    ev["claim"] = {"claim_id": new_id("clm"),
+                   "text": "preflight \"%s\": %d hit(s)" % (args.query,
+                                                            len(hits)),
+                   "claim_type": "factual", "asserted_at": now(),
+                   "context": {"spine": {"kind": "preflight",
+                                         "query": args.query,
+                                         "hits": len(hits)}}}
+    append_event(root, ev)
+    if hits and not args.reason:
+        print("PREFLIGHT: %d prior-art hit(s) - read them, then re-run "
+              "with --reason '<why proceed>'" % len(hits))
+        sys.exit(2)
+    print("PREFLIGHT: %s" % ("clean" if not hits else
+                             "PROCEED (reason logged): " + args.reason))
+
+
+# ------------------------------------------------------------------ close
+def cmd_close(args, root):
+    """Session/task close-out: STATE.md tail line + claim event naming what
+    this closes/supersedes (generalizes night_index SUPERSEDES rows)."""
+    resolved = []
+    try:
+        for ref in (args.supersedes or "").split(","):
+            ref = ref.strip()
+            if ref:
+                resolved.append(resolve_claim_ref(root, ref))
+    except SystemExit:
+        raise
+    except Exception as e:
+        sys.exit("close: %s" % e)
+    who = producer()["name"]
+    line = ("Closed %s by %s: supersedes %s%s"
+            % (now(), who, ", ".join(resolved) or "(nothing)",
+               (" - " + args.note) if args.note else ""))
+    with open(os.path.join(root, "STATE.md"), "a", encoding="utf-8") as fh:
+        fh.write("\n%s\n" % line)
+    ev = base_event("claim.emitted")
+    ev["claim"] = {"claim_id": new_id("clm"), "text": line,
+                   "claim_type": "factual", "asserted_at": now(),
+                   "context": {"spine": {"kind": "close",
+                                         "supersedes": resolved}}}
+    append_event(root, ev)
+    attest_claim(root, "STATE.md", "spine close", "close-out")
+    print("closed:", line)
+
+
+# --------------------------------------------------------- sessions ingest
+def cmd_sessions_ingest(args, root):
+    """Opt-in convention: pull harness conversation records into the repo
+    as attested files with provenance headers. Sources are opened READ-ONLY
+    (the tool never writes to them; the recorded sha256 is the proof).
+    Harness-specific source paths stay configuration - pass them here."""
+    into = args.into.strip("/") or "sessions"
+    dest_dir = os.path.join(root, into)
+    os.makedirs(dest_dir, exist_ok=True)
+    who = producer()["name"]
+    for src in args.files:
+        raw = open(src, "rb").read()               # read-only, never w+
+        h = hashlib.sha256(raw).hexdigest()
+        dest = os.path.join(dest_dir, os.path.basename(src))
+        rel = os.path.relpath(dest, root)
+        hdr = ("<!-- spine sessions ingest: source=%s sha256=%s "
+               "observed=%s by=%s mode=read-only -->\n"
+               % (os.path.abspath(src), h, now(), who))
+        with open(dest, "wb") as fh:
+            fh.write(hdr.encode("utf-8") + raw)
+        if hashlib.sha256(open(src, "rb").read()).hexdigest() != h:
+            sys.exit("sessions ingest: source mutated during ingest: %s"
+                     % src)
+        attest_claim(root, rel, "spine sessions ingest", src)
+        print("ingested:", rel, "sha256=" + h[:16])
+
+
 # ------------------------------------------------------------- selftest
-def _st(root, *rest):
+def _st(root, *rest, env=None):
+    e = dict(os.environ)
+    if env:
+        e.update(env)
     return subprocess.run([sys.executable, os.path.abspath(__file__),
                            *rest, "--dir", root], capture_output=True,
-                          text=True)
+                          text=True, env=e)
 
 
 def cmd_selftest(args):
@@ -743,6 +873,122 @@ def cmd_selftest(args):
         check("10 gate still green end-to-end (verify exit 0, reports "
               "claims line)", r.returncode == 0 and "claims:" in r.stdout,
               (r.stdout + r.stderr)[-200:])
+
+        # --- v0.4 checks: preflight / close / retest / orphans / session ---
+        r = _st(proj, "preflight", "auth redirect")
+        check("11 preflight finds prior work (exit 2, TODO+ledger hits "
+              "named)", r.returncode == 2 and "prior-art hit" in r.stdout,
+              "exit %d %s" % (r.returncode, r.stdout[:150]))
+
+        r = _st(proj, "preflight", "auth redirect", "--reason", "extending")
+        check("12 preflight --reason proceeds (exit 0, PROCEED logged)",
+              r.returncode == 0 and "PROCEED" in r.stdout,
+              "exit %d %s" % (r.returncode, r.stdout[:150]))
+
+        r = _st(proj, "preflight", "zzqqxxyyward")
+        check("13 preflight clean query exits 0",
+              r.returncode == 0 and "clean" in r.stdout,
+              "exit %d %s" % (r.returncode, r.stdout[:150]))
+
+        todo_id = re.search(r"clm_[0-9a-f]+", todo_md()).group(0)
+        r = _st(proj, "close", "--supersedes", todo_id, "--note", "shipped")
+        state = open(os.path.join(proj, "STATE.md"),
+                     encoding="utf-8").read()
+        check("14 close writes dated STATE tail + attests (supersedes id)",
+              r.returncode == 0 and "Closed" in state and todo_id in state,
+              (r.stdout + r.stderr)[:200])
+
+        before = open(os.path.join(proj, "STATE.md"), "rb").read()
+        r = _st(proj, "close", "--supersedes", "clm_PHANTOM")
+        check("15 close with phantom ref refused exit 2, STATE untouched",
+              r.returncode == 2 and open(
+                  os.path.join(proj, "STATE.md"), "rb").read() == before,
+              "exit %d" % r.returncode)
+
+        with open(os.path.join(proj, "BUGS.md"), "a",
+                  encoding="utf-8") as fh:
+            fh.write("\nB01 | %s | probe results discarded after tool "
+                     "crash\n" % time.strftime("%Y-%m-%d"))
+        _st(proj, "sign", "BUGS.md", "--by", "selftest",
+            "--reason", "add entry")
+        r = _st(proj, "verify")
+        check("16 BUGS.md discard without retest: fails the gate",
+              r.returncode == 1 and "retest:" in r.stdout,
+              "exit %d %s" % (r.returncode, r.stdout[-150:]))
+        with open(os.path.join(proj, "BUGS.md"), "a",
+                  encoding="utf-8") as fh:
+            fh.write("retest: rerun probe from saved artifacts, 2026-11-01\n")
+        _st(proj, "sign", "BUGS.md", "--by", "selftest",
+            "--reason", "add retest field")
+        r = _st(proj, "verify")
+        check("17 retest: field satisfies the gate (verify green again)",
+              r.returncode == 0, (r.stdout + r.stderr)[-150:])
+
+        r = _st(proj, "claim", "emit", "--text", "orphan probe note",
+                "--type", "factual")
+        r2 = _st(proj, "verify")
+        check("18 orphan-coverage flags unreferenced claims without "
+              "blocking", r2.returncode == 0 and "ORPHAN-COVERAGE"
+              in r2.stdout, "exit %d %s" % (r2.returncode, r2.stdout[-150:]))
+
+        r = _st(proj, "claim", "emit", "--text", "session stamp probe",
+                "--type", "factual",
+                env={"OPENFOX_SESSION_ID": "sess_TEST1234",
+                     "SPINE_PRODUCER_ID": ""})
+        last = read_events(proj)[-1]
+        check("19 OPENFOX_SESSION_ID standardized into producer agent_id",
+              r.returncode == 0 and last["producer"]["agent_id"]
+              == "urn:session:sess_TEST1234",
+              "got %s" % last["producer"].get("agent_id"))
+
+        r = _st(proj, "verify")
+        check("20 gate green after all v0.4 mutations (close/BUGS/orphan)",
+              r.returncode == 0, (r.stdout + r.stderr)[-150:])
+
+        # --- v0.4 opt-in surfaces: --with-golden + sessions ingest ---
+        proj2 = os.path.join(tmp, "golden-proj")
+        _st(proj2, "init", "--name", "gold")
+        has_g = os.path.exists(os.path.join(proj2, "tools", "golden.sh"))
+        r = _st(proj, "init", "--name", "again", "--force", "--with-golden")
+        ok_g = (os.path.exists(os.path.join(proj, "tools", "golden.sh"))
+                and os.path.exists(os.path.join(proj, "tools",
+                                                "golden.conf"))
+                and "D00g" in open(os.path.join(proj, "DECISIONS.md"),
+                                   encoding="utf-8").read())
+        check("21 default init has no golden files; --with-golden drops "
+              "stub+conf+DECISIONS seed", not has_g and r.returncode == 0
+              and ok_g, (r.stdout + r.stderr)[:150])
+
+        g = subprocess.run(["bash", os.path.join(proj, "tools",
+                                                 "golden.sh"), "capture"],
+                           capture_output=True, text=True)
+        g2 = subprocess.run(["bash", os.path.join(proj, "tools",
+                                                  "golden.sh"), "check"],
+                            capture_output=True, text=True)
+        check("22 golden.sh runs standalone in a scratch dir (capture "
+              "then check -> OK, exit 0)", g.returncode == 0
+              and g2.returncode == 0 and "OK selfcheck" in g2.stdout,
+              (g.stdout + g.stderr + g2.stdout)[-150:])
+
+        src = os.path.join(tmp, "conv-001.md")
+        with open(src, "w", encoding="utf-8") as fh:
+            fh.write("user: hello\nassistant: hi (conversation record)\n")
+        src_sha = hashlib.sha256(open(src, "rb").read()).hexdigest()
+        r = _st(proj, "sessions", "ingest", src)
+        dest = os.path.join(proj, "sessions", "conv-001.md")
+        head = open(dest, encoding="utf-8").readline() if \
+            os.path.exists(dest) else ""
+        check("23 sessions ingest writes attested provenance-headered "
+              "copy, source byte-unchanged (mode=ro)",
+              r.returncode == 0 and "spine sessions ingest" in head
+              and src_sha == hashlib.sha256(
+                  open(src, "rb").read()).hexdigest(),
+              (r.stdout + r.stderr)[:150])
+
+        r = _st(proj, "verify")
+        check("24 gate green with golden + sessions files attested "
+              "(opt-in surfaces obey R6)", r.returncode == 0,
+              (r.stdout + r.stderr)[-150:])
 
         bad = checks.count(False)
         print("SELFTEST: %s (%d/%d checks)" % ("PASS" if not bad else
@@ -876,7 +1122,7 @@ TPL["TODO.md"] = """# TODO - disposable intentions
 One line per item, max %TODO_MAX%.
 `- [ ] what | why | kills-it-if | conf 0.0-1.0 | last-touch YYYY-MM-DD`
 
-Rules (rule claims R1-R6 are in the ledger: claim query):
+Rules (rule claims R1-R7 are in the ledger: claim query):
 - Items are hypotheses, not orders. First act of a session: delete what
   no longer earns its place.
 - Conf decays x0.9 per untouched loop; >=0.7 execute; 0.4-0.7 re-probe
@@ -890,14 +1136,14 @@ TPL["DECISIONS.md"] = """# Decisions - append-only
 
 ID | date | context -> decision | why | evidence
 Supersede by appending; never edit a past entry.
-Skeleton rule rationale (R1-R6, cited + dated) lives in the ledger:
+Skeleton rule rationale (R1-R7, cited + dated) lives in the ledger:
   python3 tools/spine.py claim query
 Project decisions start at D01.
 
 ---
 
 D00 | %DATE% | Skeleton generated by ai-project-spine %VER%.
--> Rules R1-R6 bind this project until a numbered D-entry supersedes one
+-> Rules R1-R7 bind this project until a numbered D-entry supersedes one
 with counter-evidence. Evidence: their rule claims carry sources + dates.
 """
 TPL["BUGS.md"] = """# Bugs & known risks - append-only
@@ -908,6 +1154,11 @@ naming the validator (python3 tools/spine.py claim verify REF --result
 supported --method human_review|model_check|source_attestation|consensus|
 formal_proof ...). Statuses: open|probing|resolved|disputed|retracted|
 inconclusive. Gates are added only where a failure demanded one.
+
+Discipline (v0.4): an entry that DISCARDS or DOWNGRADES a measured result
+must carry a `retest:` field naming what gets re-measured and from which
+artifacts - "the tool was broken" without a re-test obligation is a data
+loss, not a verdict. verify enforces this mechanically.
 
 ---
 (no entries yet)
@@ -942,6 +1193,53 @@ echo "GATES FAILED"; exit 1
 """
 TPL[".gitignore"] = ".DS_Store\n__pycache__/\n.tmp/\n"
 
+# v0.4 opt-in (init --with-golden): the capture-before-structural-change
+# ritual, generalized from a live campaign's golden_capture.sh.
+TPL["tools/golden.sh"] = """#!/bin/bash
+# Golden capture ritual (opt-in): capture known-good command outputs BEFORE
+# a structural change, diff them AFTER. Commands live in tools/golden.conf,
+# one per line: `name|command`. This script never runs anything on its own.
+set -u
+cd "$(dirname "$0")/.."
+CONF=tools/golden.conf
+[ -f "$CONF" ] || { echo "golden: no $CONF - add lines 'name|command'"; exit 2; }
+case "${1:-check}" in
+  capture)
+    mkdir -p golden
+    while IFS='|' read -r n c; do
+      case "$n" in ''|\\#*) continue;; esac
+      eval "$c" > "golden/$n.out" 2> "golden/$n.err"
+      echo "captured $n"
+    done < "$CONF" ;;
+  check)
+    fail=0
+    while IFS='|' read -r n c; do
+      case "$n" in ''|\\#*) continue;; esac
+      [ -f "golden/$n.out" ] || { echo "MISSING golden/$n.out - run capture"; fail=1; continue; }
+      tmp=$(mktemp)
+      eval "$c" > "$tmp" 2>&1 || true
+      if diff -q "golden/$n.out" "$tmp" > /dev/null; then
+        echo "OK $n"
+      else
+        echo "DRIFT $n"; fail=1
+      fi
+      rm -f "$tmp"
+    done < "$CONF"
+    exit $fail ;;
+  *) echo "usage: golden.sh capture|check"; exit 2 ;;
+esac
+"""
+TPL["tools/golden.conf"] = """# one line per golden: name|command (command's stdout is what gets diffed)
+selfcheck|python3 -c "print('spine golden ritual alive')"
+"""
+DECISIONS_GOLDEN_SEED = """
+D00g | %DATE% | Structural changes require a golden capture first (opt-in
+ritual adopted at init --with-golden).
+-> `tools/golden.sh capture` before, `check` after; drift blocks the commit.
+Evidence: generalizes golden-capture practice proven in a live campaign
+(ai-project-spine v0.4, 2026-10-24).
+"""
+
 FILES = ["AGENTS.md", "STATE.md", "TODO.md", "DECISIONS.md", "BUGS.md",
          "CLAIMS.md", "LESSONS/README.md", "tests/run.sh", ".gitignore"]
 
@@ -967,10 +1265,21 @@ def cmd_init(args):
     os.makedirs(os.path.join(root, "tools"), exist_ok=True)
     shutil.copy2(os.path.abspath(__file__),
                  os.path.join(root, "tools", "spine.py"))
+    extra = []
+    if getattr(args, "with_golden", False):
+        for rel in ("tools/golden.sh", "tools/golden.conf"):
+            dest = os.path.join(root, rel)
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(render(TPL[rel], args.name))
+        os.chmod(os.path.join(root, "tools", "golden.sh"), 0o755)
+        with open(os.path.join(root, "DECISIONS.md"), "a",
+                  encoding="utf-8") as fh:
+            fh.write(render(DECISIONS_GOLDEN_SEED, args.name))
+        extra = ["tools/golden.sh", "tools/golden.conf"]
     os.environ.setdefault("SPINE_PRODUCER_NAME", "ai-project-spine " + VERSION)
     for rid, text, src, asof in RULES:
         rule_claim(root, rid, text, src, asof)
-    for rel in FILES + ["tools/spine.py"]:
+    for rel in FILES + ["tools/spine.py"] + extra:
         attest_claim(root, rel, "spine " + VERSION, "init")
     print("spine: skeleton ready in %s (%d rules + %d attestations)"
           % (root, len(RULES), len(FILES) + 1))
@@ -1018,6 +1327,40 @@ def cmd_verify(args):
         fails.append("PHANTOM refs: %d verdict(s) point at unissued claim "
                      "ids: %s" % (len(phantoms), ", ".join(
                          phantoms[:5])))
+    # orphan coverage (v0.4, generalizes AI_dev master_index): claims that
+    # nothing references. Informational - flagged, never blocks (R6).
+    todo_text = ""
+    tp = os.path.join(root, "TODO.md")
+    if os.path.exists(tp):
+        todo_text = open(tp, encoding="utf-8").read()
+    orphans = []
+    for cid in sorted(issued):
+        referenced = cid in todo_text
+        for ev in events:
+            if referenced:
+                break
+            rest = {k: v for k, v in ev.items() if k != "digest"}
+            blob = json.dumps(rest)
+            if cid in blob and (ev.get("claim") or {}).get("claim_id") != cid:
+                referenced = True
+        if not referenced:
+            orphans.append(cid)
+    if orphans:
+        print("ORPHAN-COVERAGE: %d/%d issued claims referenced by nothing: "
+              "%s" % (len(orphans), len(issued),
+                      ", ".join(orphans[:5]) +
+                      (" ..." if len(orphans) > 5 else "")))
+    # BUGS.md discipline (v0.4): a discarded/downgraded result without a
+    # retest: field is not allowed - discards must carry their re-measure.
+    bp = os.path.join(root, "BUGS.md")
+    if os.path.exists(bp):
+        body = open(bp, encoding="utf-8").read().split("---", 1)[-1]
+        for entry in re.split(r"\n(?=\[|B\d|BUG-)", body):
+            low = entry.lower()
+            if re.search(r"discard|downgrade|superseded-result", low) \
+                    and "retest:" not in low:
+                fails.append("BUGS.md entry discards a result without a "
+                             "retest: field: \"%s\"" % entry.strip()[:60])
     for f in fails:
         print("FAIL:", f)
     if fails:
@@ -1062,6 +1405,9 @@ def main():
     pi.add_argument("--name", required=True)
     pi.add_argument("--dir", default=".")
     pi.add_argument("--force", action="store_true")
+    pi.add_argument("--with-golden", action="store_true",
+                    help="opt-in: also drop tools/golden.sh + conf + "
+                         "DECISIONS seed (capture-before-change ritual)")
 
     pv = sub.add_parser("verify")
     pv.add_argument("--dir", default=".")
@@ -1134,6 +1480,24 @@ def main():
     psl.add_argument("--keep", action="store_true")
     psl.add_argument("--dir", default=".")
 
+    pf = sub.add_parser("preflight")
+    pf.add_argument("query")
+    pf.add_argument("--reason")
+    pf.add_argument("--artifacts", nargs="*", default=[])
+    pf.add_argument("--dir", default=".")
+
+    pcl = sub.add_parser("close")
+    pcl.add_argument("--supersedes", default="")
+    pcl.add_argument("--note")
+    pcl.add_argument("--dir", default=".")
+
+    pses = sub.add_parser("sessions")
+    ssub = pses.add_subparsers(dest="action")
+    si = ssub.add_parser("ingest")
+    si.add_argument("files", nargs="+")
+    si.add_argument("--into", default="sessions")
+    si.add_argument("--dir", default=".")
+
     args = ap.parse_args()
     if not args.cmd:
         ap.print_help()
@@ -1153,6 +1517,15 @@ def main():
         cmd_loop_close(args, args.dir)
     elif args.cmd == "selftest":
         cmd_selftest(args)
+    elif args.cmd == "preflight":
+        cmd_preflight(args, args.dir)
+    elif args.cmd == "close":
+        cmd_close(args, args.dir)
+    elif args.cmd == "sessions":
+        if args.action != "ingest":
+            pses.print_help()
+            sys.exit(2)
+        cmd_sessions_ingest(args, args.dir)
     elif args.cmd == "claim":
         if args.verb == "emit":
             cmd_claim_emit(args, args.dir)

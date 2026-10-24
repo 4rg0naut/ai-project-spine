@@ -1,6 +1,6 @@
 # ai-project-spine - agent start-here
 
-Purpose: see STATE.md first block. Skeleton by ai-project-spine 0.3.1 2026-10-21.
+Purpose: see STATE.md first block. Skeleton by ai-project-spine 0.4.0 2026-10-24.
 
 Boot ritual (every session, in order):
 1. Read STATE.md - it is the state and ends with the literal next command.

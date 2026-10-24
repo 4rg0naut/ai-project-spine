@@ -24,3 +24,19 @@ test that reads text. Verified by lesson claim L01
 (claim query: kind=lesson) and 10/10 selftest; validator: chris
 (human_review) in the 2026-10-21 external review session + builder
 session gate run 2026-10-21.
+
+Discipline (v0.4): an entry that DISCARDS or DOWNGRADES a measured result
+must carry a `retest:` field naming what gets re-measured and from which
+artifacts - "the tool was broken" without a re-test obligation is a data
+loss, not a verdict. verify enforces this mechanically.
+
+B02 | 2026-10-24 | [invariant] open -> probing
+init --force regenerates human-owned sections as templates: the v0.4
+dogfood wiped the STATE.md Purpose/Phase and re-dated DECISIONS D00
+(append-only violation) in this very repo; caught only by git diff.
+Evidence: claim lesson-init-force-wipes-human-state, files restorable
+via git history of this commit range.
+retest: next skeleton regeneration over a live project (AI_dev or this
+repo) must run regen-to-scratch + per-file diff FIRST and show zero
+loss of human sections; tool output must also warn about overwrite
+scope - re-measure at the next campaign close.

@@ -3,7 +3,7 @@
 One line per item, max 3.
 `- [ ] what | why | kills-it-if | conf 0.0-1.0 | last-touch YYYY-MM-DD`
 
-Rules (rule claims R1-R6 are in the ledger: claim query):
+Rules (rule claims R1-R7 are in the ledger: claim query):
 - Items are hypotheses, not orders. First act of a session: delete what
   no longer earns its place.
 - Conf decays x0.9 per untouched loop; >=0.7 execute; 0.4-0.7 re-probe

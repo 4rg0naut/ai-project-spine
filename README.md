@@ -24,7 +24,7 @@ DECISIONS.md         append-only numbered decisions (D00 = "spine rules bind")
 BUGS.md              bugs as gate-demanding records, [invariant]/[domain]
 CLAIMS.md            human index; machine truth is the ledger
 LESSONS/README.md    lessons need claim_ref + evidence or don't exist
-claims/claims.jsonl  hash-chained ledger: rules R1-R6 (with citations +
+claims/claims.jsonl  hash-chained ledger: rules R1-R7 (with citations +
                      as-of dates) + hash attestation of every file
 tools/spine.py       the gate itself, copied in — yours forever
 tests/run.sh         one-command gate
@@ -35,7 +35,7 @@ Your harness rule to add (one line in the fleet-level agent file):
 > New project? Run `python3 path/to/spine.py init --name "X"`, then read
 > its AGENTS.md. Never hand-write the skeleton.
 
-## The verbs (v0.3.1)
+## The verbs (v0.4)
 
 Exit codes: `0` ok · `1` a gate failed (verify/conform/selftest) ·
 `2` usage or validation refused (unknown/ambiguous claim ref, cap hit,
@@ -71,13 +71,45 @@ touch the ledger.
   byte-identical ledger → ambiguous prefix refused with candidates named
   → gate green. Every check walks the path a human actually copies; this
   is the gate that v0.3 lacked. Included in generated `tests/run.sh`.
+- `preflight "QUERY" [--reason WHY] [--artifacts F...]` — rule R7, search
+  before you build: greps the claims ledger, TODO.md and the artifacts
+  index (default README/STATE/TODO/DECISIONS/BUGS/CLAIMS, extendable via
+  `SPINE_ARTIFACTS` env + `--artifacts`), prints dated hits, records the
+  search as a ledger event. Hits exit 2 until you re-run with `--reason`
+  — the "I feel this was already done" gate, generalized from a measured
+  47-vs-30 divergent-branch incident.
+- `close [--supersedes ID,ID] [--note "..."]` — session/task close-out:
+  dated tail line in STATE.md + claim event naming what it supersedes
+  (claim refs must resolve or exit 2, STATE untouched). STATE.md is
+  re-attested by the verb, so the gate stays green.
+- `verify` (v0.4 additions): flags `ORPHAN-COVERAGE` — issued claims
+  referenced by nothing (informational, never blocks, rule R6) — and
+  fails `BUGS.md` entries that discard/downgrade a result without a
+  `retest:` field: discards must carry their re-measure obligation.
+- Producer standardization: with `OPENFOX_SESSION_ID` set and no explicit
+  `SPINE_PRODUCER_ID`, every event's `producer.agent_id` becomes
+  `urn:session:<id>` — ledger rows trace to the session that wrote them.
+- `sessions ingest FILES... [--into DIR]` — OPT-IN convention for pulling
+  harness conversation records (chat DBs, transcripts) into the repo as
+  attested files with a provenance header (`source`, `sha256`, `observed`,
+  `by`, `mode=read-only`). Sources are only ever opened read-only — the
+  recorded digest is re-checked after each copy, so the guarantee is
+  mechanical, not a promise. Harness-specific paths stay configuration:
+  you pass the files (e.g. a dump produced from `sessions.db` opened
+  `mode=ro`, like AI_dev's `session_mine.py` contract).
+- `init --with-golden` — OPT-IN capture-before-structural-change ritual:
+  drops an executable `tools/golden.sh` (`capture` / `check` against
+  `tools/golden.conf`, one `name|command` per line) plus a D00g DECISIONS
+  seed. Default `init` output is unchanged except the version stamp and
+  the R7/retest template lines (verified by diffing v0.3.1 vs v0.4
+  skeletons).
 
 Claim refs (v0.3.1): a `clm_` id given to `claim verify|dispute|retract`
 or `todo done|drop` must resolve — exact id, or unique prefix; unknown or
 ambiguous refs exit 2 and name candidates. TODO.md shows full ids, so
 what you see is what you copy.
 
-`mcp` (same verbs as MCP tools for agent harnesses) is v0.4 — thin
+`mcp` (same verbs as MCP tools for agent harnesses) is v0.5 — thin
 mechanical hat over the existing CLI.
 
 ## The confidence loop, in one story
