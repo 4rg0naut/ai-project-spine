@@ -35,7 +35,12 @@ Your harness rule to add (one line in the fleet-level agent file):
 > New project? Run `python3 path/to/spine.py init --name "X"`, then read
 > its AGENTS.md. Never hand-write the skeleton.
 
-## The verbs (v0.3)
+## The verbs (v0.3.1)
+
+Exit codes: `0` ok · `1` a gate failed (verify/conform/selftest) ·
+`2` usage or validation refused (unknown/ambiguous claim ref, cap hit,
+overwrite without --force, model_check above 0.6) — refused writes never
+touch the ledger.
 
 - `init --name NAME [--dir DIR] [--force]` — generate the skeleton, seed
   rule claims (cited + dated), attest every file.
@@ -60,6 +65,17 @@ Your harness rule to add (one line in the fleet-level agent file):
   auto-expire with a retraction event, and a numbered loop marker lands
   in the chain. The report tells you per item: execute / re-probe /
   defer / expired.
+- `selftest` — the whole tool proven in a temp dir in ~1 second: init →
+  todo add → endorse the id copied from TODO.md TEXT (not from code
+  variables) → loop refresh vs decay → phantom ref rejected exit 2 with
+  byte-identical ledger → ambiguous prefix refused with candidates named
+  → gate green. Every check walks the path a human actually copies; this
+  is the gate that v0.3 lacked. Included in generated `tests/run.sh`.
+
+Claim refs (v0.3.1): a `clm_` id given to `claim verify|dispute|retract`
+or `todo done|drop` must resolve — exact id, or unique prefix; unknown or
+ambiguous refs exit 2 and name candidates. TODO.md shows full ids, so
+what you see is what you copy.
 
 `mcp` (same verbs as MCP tools for agent harnesses) is v0.4 — thin
 mechanical hat over the existing CLI.

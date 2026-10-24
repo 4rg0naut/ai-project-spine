@@ -12,8 +12,10 @@ Canonicalization: RFC 8785-style JCS, byte-compatible with the OpenClaims
 v0.1 reference (proven by `claim conform` against embedded fixtures that
 must reproduce their reference digests).
 
-v0.3: init/verify/sign + native claim family + conformance self-test +
-todo/loop (decaying-confidence intentions engine). `mcp` is v0.4.
+v0.3.1: same surface, less lying - claim refs must resolve (exact id or
+unique prefix, else exit 2 and the ledger stays byte-identical), full ids
+everywhere so copy-paste cannot silently no-op, and a `selftest` gate that
+walks the exact paths a human copies. `mcp` is v0.4.
 """
 import argparse
 import base64
@@ -23,12 +25,14 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from decimal import Decimal
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LEDGER = os.path.join("claims", "claims.jsonl")
 SPEC_VERSION = "0.1.0"
 SCHEMA_URL = "https://openclaims.org/schemas/openclaims/0.1/ClaimEvent.schema.json"
@@ -331,6 +335,49 @@ def chain_check(events):
     return True, "chain ok (%d events)" % len(events)
 
 
+# ------------------------------------------------------------ claim refs
+def issued_claim_ids(root):
+    ids = []
+    for ev in read_events(root):
+        cid = (ev.get("claim") or {}).get("claim_id")
+        if cid:
+            ids.append(cid)
+    return ids
+
+
+def resolve_claim_ref(root, ref):
+    """Exact id wins; else unique prefix; else refuse (exit 2, no write).
+
+    Silent no-op verdicts were the v0.3 disease: a truncated or invented
+    ref recorded a real-looking verdict pointing at nothing (BUG-002).
+    """
+    ids = issued_claim_ids(root)
+    if ref in ids:
+        return ref
+    hits = [i for i in ids if i.startswith(ref)]
+    if len(set(hits)) == 1:
+        return hits[0]
+    if not hits:
+        sys.stderr.write(
+            "reject: unknown claim ref %s - no issued claim carries it; "
+            "full ids are in TODO.md and `claim query` (rule R6: refuse "
+            "loud, never silently no-op)\n" % ref)
+    else:
+        seen, order = set(), []
+        for i in reversed(hits):
+            if i not in seen:
+                seen.add(i)
+                order.append(i)
+        sys.stderr.write(
+            "reject: ambiguous claim ref %s - %d claims match, give more "
+            "characters (most recent first):%s\n" % (
+                ref, len(seen),
+                "".join("\n  " + h for h in order[:8]) +
+                ("\n  ... and %d more" % (len(seen) - 8)
+                 if len(seen) > 8 else "")))
+    raise SystemExit(2)
+
+
 # ------------------------------------------------------------- claim verbs
 def sel_from_spec(spec):
     parts = (spec or "uri_fragment:full").split(":")
@@ -371,13 +418,17 @@ def cmd_claim_emit(args, root):
 
 
 def cmd_claim_verdict(args, root, kind):
+    args.claim_ref = resolve_claim_ref(root, args.claim_ref)
     ev = base_event("claim." + kind)
     ev["claim_ref"] = args.claim_ref
     if kind == "verified":
         if args.method == "model_check" and args.confidence > 0.6:
-            sys.exit("reject: model_check cannot grade above 0.6 - the loop "
-                     "that wrote an item cannot be its own judge (rule R4); "
-                     "use human_review/pipeline/formal_proof with evidence")
+            sys.stderr.write(
+                "reject: model_check cannot grade above 0.6 - the loop that "
+                "wrote an item cannot be its own judge (rule R4); use "
+                "human_review/pipeline/formal_proof with evidence "
+                "(exit 2: validation refused)\n")
+            raise SystemExit(2)
         v = {"verification_id": new_id("ver"),
              "verification_result": args.result,
              "verification_method": args.method,
@@ -481,7 +532,7 @@ def write_todo_md(root):
                      "this)")
     for cid, it in sorted(active.items(), key=lambda kv: -kv[1]["conf"]):
         lines.append("- [ ] %s (%s) | why: %s | kills-it-if: %s | conf %.2f "
-                     "| last-touch %s" % (it["what"], cid[:15], it["why"],
+                     "| last-touch %s" % (it["what"], cid, it["why"],
                                           it["kills"], it["conf"],
                                           it["touched"]))
     lines.append("")
@@ -511,7 +562,9 @@ def cmd_todo(args, root):
                                              "conf": args.conf}}}
         append_event(root, ev)
         print("added:", ev["claim"]["claim_id"])
-    elif args.action == "done":
+    elif args.action in ("done", "drop"):
+        args.claim_ref = resolve_claim_ref(root, args.claim_ref)
+    if args.action == "done":
         ev = base_event("claim.verified")
         ev["claim_ref"] = args.claim_ref
         ev["verification"] = {"verification_id": new_id("ver"),
@@ -562,7 +615,7 @@ def cmd_loop_close(args, root):
                                             "name": "spine loop " + VERSION},
                               "verified_at": now(), "confidence": conf}
         append_event(root, ev)
-        report.append((cid[:15], it["what"][:40], conf, action_for(conf)))
+        report.append((cid, it["what"][:40], conf, action_for(conf)))
         if conf < 0.2:
             ev = base_event("claim.retracted")
             ev["claim_ref"] = cid
@@ -570,7 +623,7 @@ def cmd_loop_close(args, root):
             ev["retraction_reason"] = ("expired: conf %.2f < 0.2 after loop "
                                        "%d" % (conf, idx))
             append_event(root, ev)
-            report[-1] = (cid[:15], it["what"][:40], conf, "EXPIRED+retracted")
+            report[-1] = (cid, it["what"][:40], conf, "EXPIRED+retracted")
     ev = base_event("claim.emitted")
     ev["claim"] = {"claim_id": new_id("clm"),
                    "text": "loop %d closed: %d items updated" % (idx,
@@ -582,9 +635,125 @@ def cmd_loop_close(args, root):
     attest_claim(root, "TODO.md", "spine loop", "loop %d" % idx)
     print("loop %d closed:" % idx)
     for cid, what, conf, act in report:
-        print("  %-16s %-42s conf %.2f  -> %s" % (cid, what, conf, act))
+        print("  %-30s %-42s conf %.2f  -> %s" % (cid, what, conf, act))
     if not report:
         print("  (no active items)")
+
+
+# ------------------------------------------------------------- selftest
+def _st(root, *rest):
+    return subprocess.run([sys.executable, os.path.abspath(__file__),
+                           *rest, "--dir", root], capture_output=True,
+                          text=True)
+
+
+def cmd_selftest(args):
+    """End-to-end gate in a temp dir: walks the exact paths a human copies.
+
+    Origin (2026-10-21 review): truncated ids in TODO.md silently defeated
+    `claim verify` for copy-paste users; phantom refs were accepted. Tests
+    only walk the paths they were written to walk - this walks the TEXT.
+    """
+    tmp = tempfile.mkdtemp(prefix="spine-selftest-")
+    proj = os.path.join(tmp, "selftest-proj")
+    checks = []
+
+    def check(name, cond, detail=""):
+        checks.append(bool(cond))
+        print("%s  %s%s" % ("PASS" if cond else "FAIL", name,
+                            "" if cond else "   <- " + detail))
+
+    def todo_md():
+        with open(os.path.join(proj, "TODO.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def ledger_bytes():
+        with open(os.path.join(proj, LEDGER), "rb") as fh:
+            return fh.read()
+
+    try:
+        r = _st(proj, "init", "--name", "selftest")
+        check("1 init builds a skeleton (exit 0)", r.returncode == 0,
+              (r.stderr or r.stdout)[:200])
+
+        r = _st(proj, "todo", "add", "--what", "Fix auth redirect",
+                "--why", "login loop reported", "--kills", "probe shows ok")
+        m = re.search(r"clm_[0-9a-f]+", r.stdout)
+        issued = m.group(0) if m else ""
+        check("2 todo add issues a full id (exit 0, clm_ + 26 hex)",
+              r.returncode == 0 and len(issued) == 30,
+              (r.stdout + r.stderr)[:200])
+        _st(proj, "todo", "add", "--what", "Cache headers",
+            "--why", "slow first paint", "--kills", "trace shows origin")
+
+        line = next((l for l in todo_md().splitlines()
+                     if "Fix auth redirect" in l), "")
+        shown = re.search(r"clm_[0-9a-f]+", line)
+        copied = shown.group(0) if shown else ""
+        check("3 TODO.md renders the FULL id (what you see is what you "
+              "copy)", copied == issued,
+              "issued %s but TODO.md shows %s" % (issued, copied))
+
+        r = _st(proj, "claim", "verify", copied, "--result", "supported",
+                "--method", "human_review", "--confidence", "0.85")
+        check("4 the copied id endorses to conf 0.85 (roundtrip from text)",
+              r.returncode == 0 and "| conf 0.85" in todo_md(),
+              "exit %d; md line: %s" % (r.returncode, next(
+                  (l for l in todo_md().splitlines()
+                   if "Fix auth redirect" in l), "?")))
+
+        r = _st(proj, "loop", "--close", "--method", "source_attestation")
+        md = todo_md()
+        endorsed = next((l for l in md.splitlines()
+                         if "Fix auth redirect" in l), "")
+        other = next((l for l in md.splitlines() if "Cache headers" in l), "")
+        check("5 loop refreshes the endorsed item (0.85 -> 0.765, still "
+              "execute) while the untouched one decays (0.55 -> 0.495)",
+              "| conf 0.77" in endorsed and "| conf 0.49" in other,
+              "endorsed: %s | other: %s" % (endorsed[-60:], other[-60:]))
+
+        before = ledger_bytes()
+        r = _st(proj, "claim", "verify", "clm_DOESNOTEXIST", "--result",
+                "supported", "--method", "human_review")
+        check("6 phantom claim ref rejected exit 2, ledger byte-unchanged",
+              r.returncode == 2 and ledger_bytes() == before,
+              "exit %d" % r.returncode)
+
+        before = ledger_bytes()
+        r = _st(proj, "todo", "done", "clm_NOPE", "--by", "chris")
+        check("7 todo done with phantom ref rejected exit 2, ledger "
+              "untouched", r.returncode == 2 and ledger_bytes() == before,
+              "exit %d" % r.returncode)
+
+        r = _st(proj, "claim", "verify", issued[:-1], "--result",
+                "supported", "--method", "human_review",
+                "--confidence", "0.85")
+        check("8 unique prefix (full id minus last char) resolves and "
+              "endorses", r.returncode == 0 and "| conf 0.85" in todo_md(),
+              "exit %d %s" % (r.returncode, r.stderr[:120]))
+
+        r = _st(proj, "claim", "verify", "clm_", "--result", "supported",
+                "--method", "human_review")
+        named = re.findall(r"clm_[0-9a-f]+", r.stderr)
+        check("9 ambiguous prefix rejected exit 2, candidates named",
+              r.returncode == 2 and issued in named,
+              "exit %d; named %d candidates" % (r.returncode, len(named)))
+
+        r = _st(proj, "verify")
+        check("10 gate still green end-to-end (verify exit 0, reports "
+              "claims line)", r.returncode == 0 and "claims:" in r.stdout,
+              (r.stdout + r.stderr)[-200:])
+
+        bad = checks.count(False)
+        print("SELFTEST: %s (%d/%d checks)" % ("PASS" if not bad else
+                                               "FAIL", len(checks) - bad,
+                                               len(checks)))
+        sys.exit(0 if not bad else 1)
+    finally:
+        if args.keep:
+            print("selftest: temp dir kept at %s" % tmp)
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ------------------------------------------------------------- conformance
@@ -767,6 +936,7 @@ cd "$(dirname "$0")/.."
 ok=1
 python3 tools/spine.py verify || ok=0
 python3 tools/spine.py claim conform || ok=0
+python3 tools/spine.py selftest || ok=0
 [ "$ok" = 1 ] && { echo "ALL GATES PASS"; exit 0; }
 echo "GATES FAILED"; exit 1
 """
@@ -840,6 +1010,14 @@ def cmd_verify(args):
     if os.path.exists(st) and "Next command:" not in open(
             st, encoding="utf-8").read():
         fails.append("STATE.md lost its literal next-command (resume rule)")
+    issued = set(issued_claim_ids(root))
+    verdicts = [ev for ev in events if ev["event_type"] != "claim.emitted"]
+    phantoms = sorted({ev["claim_ref"] for ev in verdicts
+                       if ev.get("claim_ref") not in issued})
+    if phantoms:
+        fails.append("PHANTOM refs: %d verdict(s) point at unissued claim "
+                     "ids: %s" % (len(phantoms), ", ".join(
+                         phantoms[:5])))
     for f in fails:
         print("FAIL:", f)
     if fails:
@@ -847,6 +1025,8 @@ def cmd_verify(args):
         sys.exit(1)
     print("VERIFY: PASS (%d events, %d files attested, %s)"
           % (len(events), len(att), msg))
+    print("claims: %d issued | %d verdicts | %d phantom refs"
+          % (len(issued), len(verdicts), len(phantoms)))
 
 
 def cmd_sign(args):
@@ -871,8 +1051,11 @@ def cmd_sign(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="spine.py",
-                                 description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(
+        prog="spine.py", description=__doc__.splitlines()[0],
+        epilog="exit codes: 0 ok | 1 gate failed (verify/conform/selftest) "
+               "| 2 usage or validation refused (bad ref, cap, overwrite, "
+               "model_check over 0.6)")
     sub = ap.add_subparsers(dest="cmd")
 
     pi = sub.add_parser("init")
@@ -947,6 +1130,10 @@ def main():
                      choices=sorted(VERIFICATION_METHODS))
     plo.add_argument("--dir", default=".")
 
+    psl = sub.add_parser("selftest")
+    psl.add_argument("--keep", action="store_true")
+    psl.add_argument("--dir", default=".")
+
     args = ap.parse_args()
     if not args.cmd:
         ap.print_help()
@@ -964,6 +1151,8 @@ def main():
         cmd_todo(args, args.dir)
     elif args.cmd == "loop":
         cmd_loop_close(args, args.dir)
+    elif args.cmd == "selftest":
+        cmd_selftest(args)
     elif args.cmd == "claim":
         if args.verb == "emit":
             cmd_claim_emit(args, args.dir)
