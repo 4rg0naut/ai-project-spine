@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- spine keeper LaunchDaemon template (criterion 19). Install by the
+     human, with sudo (agents run with zero sudo):
+       sudo cp com.openfox.spine-keeper.plist /Library/LaunchDaemons/
+       sudo launchctl load /Library/LaunchDaemons/com.openfox.spine-keeper.plist
+     Replace /PATH/TO placeholders; run the server as the dedicated
+     no-login librarian account, never as the agent user. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openfox.spine-keeper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/PATH/TO/spine.py</string>
+    <string>mcp</string>
+    <string>--http</string>
+    <string>8370</string>
+    <string>--dir</string>
+    <string>/PATH/TO/records-root</string>
+  </array>
+  <key>UserName</key>
+  <string>_spinekeeper</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/spine-keeper.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/spine-keeper.err</string>
+</dict>
+</plist>

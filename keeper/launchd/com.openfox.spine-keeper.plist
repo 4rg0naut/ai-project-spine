@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- spine keeper LaunchDaemon, resolved for this machine (criterion 19).
+     Rust keeper daemon: verify + vault mirror every 300s as the
+     dedicated no-login account. Install (human, sudo):
+       sudo cp com.openfox.spine-keeper.plist /Library/LaunchDaemons/
+       sudo launchctl bootstrap system /Library/LaunchDaemons/com.openfox.spine-keeper.plist
+     Placeholder template kept in com.openfox.spine-keeper.plist.template. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openfox.spine-keeper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Volumes/DEV/OpenFox/ai-project-spine/keeper/target/release/keeper</string>
+    <string>daemon</string>
+    <string>--dir</string>
+    <string>/Volumes/DEV/OpenFox/ai-project-spine</string>
+    <string>--interval</string>
+    <string>300</string>
+    <string>--mirror</string>
+    <string>/Volumes/DEV/spine-vault</string>
+    <string>--log</string>
+    <string>/var/log/spine-keeper/daemon.jsonl</string>
+  </array>
+  <key>UserName</key>
+  <string>_spinekeeper</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/spine-keeper/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/spine-keeper/launchd.err</string>
+</dict>
+</plist>

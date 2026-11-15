@@ -19,6 +19,7 @@ Standard library only. Python 3.9+. No dependencies, no build.
 ```
 AGENTS.md            short start-here signpost (size-capped, gate-enforced)
 STATE.md             resume file; always ends with the literal next command
+harness.md           step-zero ritual + deny-paths (which files verbs own)
 TODO.md              disposable intentions with decaying confidence
 DECISIONS.md         append-only numbered decisions (D00 = "spine rules bind")
 BUGS.md              bugs as gate-demanding records, [invariant]/[domain]
@@ -26,16 +27,25 @@ CLAIMS.md            human index; machine truth is the ledger
 LESSONS/README.md    lessons need claim_ref + evidence or don't exist
 claims/claims.jsonl  hash-chained ledger: rules R1-R7 (with citations +
                      as-of dates) + hash attestation of every file
-tools/spine.py       the gate itself, copied in — yours forever
+data/db/records.jsonl clerk database (append-only snapshots, schema-checked)
+data/measurements.jsonl measured results: value+unit+command+observed,
+                     re-runnable (`measure audit`)
+data/kindex.jsonl    derived knowledge index (`index build`); search ranks
+                     measured > linked > asserted
+vault/               notes that cite machine facts (fact:<id>)
+tools/REGISTRY.md    every tool registered: path | status | purpose
+tools/spine.py       the gate itself, copied in — yours forever (uchg-locked)
 tests/run.sh         one-command gate
 ```
 
 Your harness rule to add (one line in the fleet-level agent file):
 
-> New project? Run `python3 path/to/spine.py init --name "X"`, then read
-> its AGENTS.md. Never hand-write the skeleton.
+> New project? Run `python3 path/to/spine.py init --name "X"`, then
+> `python3 spine.py hooks install --dir DIR` (git repo needed), then read
+> its AGENTS.md - and refuse to launch the first session on an unverified
+> skeleton (`verify` must exit 0). Never hand-write the skeleton.
 
-## The verbs (v0.4)
+## The verbs (v0.5)
 
 Exit codes: `0` ok · `1` a gate failed (verify/conform/selftest) ·
 `2` usage or validation refused (unknown/ambiguous claim ref, cap hit,
@@ -109,8 +119,62 @@ or `todo done|drop` must resolve — exact id, or unique prefix; unknown or
 ambiguous refs exit 2 and name candidates. TODO.md shows full ids, so
 what you see is what you copy.
 
-`mcp` (same verbs as MCP tools for agent harnesses) is v0.5 — thin
-mechanical hat over the existing CLI.
+v0.5 adds the knowledge layer — the machine that remembers what it
+measured, what it merely asserts, and where each number came from:
+
+- `claim emit --kind measured|linked|asserted` — trust tiers stamped at
+  birth (default `asserted`, so old ledgers load unchanged);
+  `claim query --kind measured` filters; `claim export --kinds
+  measured,linked` emits JSONL fit for training input — asserted-only
+  rows never masquerade as data.
+- `db add|get|link|supersede|list` — clerk verbs over
+  `data/db/records.jsonl`: schema-validated (a malformed line exits 2 and
+  the file stays byte-identical), append-only snapshots, every accepted
+  write attests + prints a receipt sha, `verify` re-runs after each
+  write, and a failing gate voids the fresh record with a retraction
+  event instead of letting it stand uncounted.
+- `measure append --command CMD --unit U --source-claim ID` — records
+  `{value, unit, source_claim, command, observed}`; the claimed value
+  must equal what the command prints right now or the append is refused.
+  `measure audit` re-runs every row: OK / DRIFT, exit 1 on drift. A
+  number without its command is decoration, not measurement.
+- `index build` / `search QUERY [--budget N] [--explain]` — derived
+  knowledge index over measurements + db records + vault notes; results
+  carry trust labels, STALE flags and source pointers, budgeted in
+  tokens; `--explain` shows the score and why a note is stale.
+- `archive` — moves dated STATE.md blocks to `docs/STATE-LOG.md`
+  byte-exact, keeps the next-command block last, re-attests. `verify`
+  reports STATE weight; over 120 lines it WARNs until DECISIONS.md
+  carries `state-cap: strict`, then it fails.
+- `hooks install|status|unlock --reason WHY` — git pre-commit gate (fast
+  verify; bypass only via `LEDGER_HOOK_BYPASS="why"`, logged to
+  `hooks-bypass.log`) plus real prevention: `uchg` on the ledger,
+  `tools/REGISTRY.md`, derived views and the project's `spine.py` copy.
+  Verbs unlock-write-relock; `hooks status` reports flag state.
+- `adopt [--dry-run]` — in-place upgrade of an older skeleton: pre-existing
+  files stay byte-identical (proven by hash), new parts land as new
+  signed files, STATE.md is not touched, old claim ids still resolve.
+- `promote CLAIM_ID --to spine` — append the claim to the spine repo's
+  `INBOX.md` review queue (unresolved refs exit 2).
+- `dayreport [--date YYYY-MM-DD]` — the morning verdict for unattended
+  runs: gate tally, bypass/unlock events with reasons, stale views with
+  their re-derive commands, lock state.
+- `vault init --volume P | mirror | rehydrate | status` — record vault on
+  a volume: a volume that ignores unix ownership is a hard error
+  (IGNORED-OWNERSHIP), mirror/rehydrate proven byte-identical.
+- `db … / preflight … --server URL` — fleet mode: calls to another
+  machine's `mcp --http` server; unreachable servers spool the write
+  locally and replay on next contact; preflight queries the whole fleet.
+- `mcp [--http PORT]` — native tool surface (stdio JSON-RPC, or HTTP at
+  `/mcp`) exposing verify/preflight/db/measure/loop/search/dayreport;
+  exit-2 semantics survive the round-trip (`exit_code` in every result).
+  `tools/difftest.py` runs the same scenarios against the Rust keeper
+  (`keeper/`) — byte-parity on the subset is the gate before keeper
+  replaces the Python hot path.
+
+`verify` also warns (never fails, v0.5) about unregistered executables
+in `tools/` and STALE derived views whose sources moved; the warning
+names the re-derive command.
 
 ## The confidence loop, in one story
 
