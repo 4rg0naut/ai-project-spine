@@ -38,3 +38,5 @@ Closed 2026-11-14T22:10:43Z by ai-project-spine 0.5.0: supersedes (nothing) - pl
 Closed 2026-11-14T22:25:50Z by ai-project-spine 0.5.0: supersedes (nothing) - criterion 19 live: LaunchDaemon com.openfox.spine-keeper running as _spinekeeper (pid 39040), 300s cycles exit 0 drifts 0, mirror byte-identical on /Volumes/DEV/spine-vault (vault status 0 differ)
 
 Closed 2026-11-14T22:30:46Z by ai-project-spine 0.5.0: supersedes (nothing) - criterion 19 closed live: launchd supervision respawn proven (kill 39040 -> new pid 49067 as _spinekeeper, log continuous exit 0); live rehydrate byte-identical from /Volumes/DEV/spine-vault; IGNORED-OWNERSHIP caught live on HUB; logout-span rides the next natural boot in /var/log/spine-keeper/daemon.jsonl
+
+Closed 2026-11-15T09:22:07Z by ai-project-spine 0.5.0: supersedes (nothing) - v0.5.0 pushed to public origin a5d2410 (tag v0.5.0); clone gates green; public bootstrap verified
